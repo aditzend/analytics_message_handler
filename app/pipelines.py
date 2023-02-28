@@ -4,7 +4,8 @@ import nlp_processor
 from types import SimpleNamespace
 import json
 import pandas as pd
-
+from rabbit import RabbitMQ
+import datetime
 
 class Utterance(object):
     text: str
@@ -24,65 +25,75 @@ class Entity(object):
 
 
 class ProcessResult(object):
-    events: list
-    entities: list
-    sentiments: list
-    intent_groups: list
-    intent_subgroups: list
-    emotions: list
-    hate_speech_flag: bool
-    neg_sentiment_flag: bool
-    anger_emotion_flag: bool
-    disgust_emotion_flag: bool
+    def __init__(self):
+        self.events = []
+        self.entities = []
+        self.sentiments = []
+        self.intent_groups = []
+        self.intent_subgroups = []
+        self.emotions = []
+        self.main_emotion = ""
+        self.main_intent_group = ""
+        self.main_intent_subgroup = ""
+        self.main_sentiment = ""
+        self.hate_speech_flag = False
+        self.neg_sentiment_flag = False
+        self.joy_emotion_flag = False
+        self.sadness_emotion_flag = False
+        self.surprise_emotion_flag = False
+        self.fear_emotion_flag = False
+        self.anger_emotion_flag = False
+        self.disgust_emotion_flag = False
 
 
 logger = logging.getLogger(__name__)
 
 
-def process(channel, method, properties, body):
+def process(ch, method, properties, body):
+    result = ProcessResult()
+    rabbit = RabbitMQ()
     try:
         job = json.loads(body.decode())
-        job = job["data"]
-        j = SimpleNamespace(**job)
+        j = SimpleNamespace(**job["data"])
         pipeline = j.pipeline or "default"
         utterances = j.utterances
 
-        logger.debug(f"utterances {utterances[0]} type {type(utterances[0])}")
         # TODO: For now, segment id is the same as interaction id with id 1
 
         # TODO: Default is the only pipeline for now
         if pipeline == "default":
-            events = []
-            entities = []
-            sentiments = []
-            intent_groups = []
-            intent_subgroups = []
-            emotions = []
-            hate_speech_flag = False
-            neg_sentiment_flag = False
-            anger_emotion_flag = False
-            disgust_emotion_flag = False
             event_position = 1
+            # format date as YYYY-MM-DD HH:MM:SS
+            datetime.datetime.now().strftime("-D%Y-%m-%dT%H:%M")
+            current_minute = datetime.datetime.now().strftime("-%Y-%m-%dT%H:%M")
+            sender_id = j.interaction_id + str(current_minute)
             for utterance in utterances:
                 utterance = SimpleNamespace(**utterance)
                 event_id = j.interaction_id + "-s1-e" + str(event_position)
-                intent = intent_processor.parse(
-                    interaction_id=j.interaction_id,
-                    text=utterance.text,
-                    channel=utterance.channel,
-                )
+
 
                 nlp = nlp_processor.parse(
-                    interaction_id=j.interaction_id,
+                    interaction_id=sender_id,
                     text=utterance.text,
                     channel=utterance.channel,
                 )
 
+                message_for_rasa = f'{utterance.text} [{nlp["emotion"]["output"].upper()}] [{nlp["sentiment"]["output"]}]'
+                intent = intent_processor.parse(
+                    interaction_id=sender_id,
+                    text=message_for_rasa,
+                    channel=utterance.channel,
+                )                
+
                 event = {
+                    "text": utterance.text,
                     "interaction_id": j.interaction_id,
                     "segment_id": j.interaction_id + "-s1",
-                    "id": event_id,
+                    "event_id": event_id,
                     "type": "utterance",
+                    "start": utterance.start,
+                    "end": utterance.end,
+                    "channel": utterance.channel,
                     "nlp": {
                         "intent": intent,
                         "entities": intent["entities"],
@@ -97,7 +108,7 @@ def process(channel, method, properties, body):
                 if intent["entities"]:
                     for entity in intent["entities"]:
                         entity = SimpleNamespace(**entity)
-                        entities.append(
+                        result.entities.append(
                             {
                                 "score": entity.confidence_entity,
                                 # entity must be all caps
@@ -111,35 +122,49 @@ def process(channel, method, properties, body):
                         )
                 if nlp["ner"]:
                     for entity in nlp["ner"]:
-                        entity = SimpleNamespace(**entity)
-                        entities.append(
-                            {
-                                "score": entity.score,
-                                "entity": entity.type,
-                                "value": entity.text,
-                                "event_id": event_id,
-                                "start": entity.start,
-                                "end": entity.end,
-                                "channel": utterance.channel,
-                            }
-                        )
-                intent_groups.append(intent["intent_level_1"])
-                intent_subgroups.append(intent["intent_level_2"])
-                emotions.append(nlp["emotion"]["output"])
-                sentiments.append(nlp["sentiment"]["output"])
+                        if type(entity) is dict:
+                            logger.warning(entity)
+                            result.entities.append(
+                                {
+                                    "score": entity["score"] or 0.0,
+                                    "entity": entity["type"] or "UNKNOWN",
+                                    "value": entity["text"] or "",
+                                    "event_id": event_id,
+                                    "start": entity["start"] or 0.0,
+                                    "end": entity["end"] or 0.0,
+                                    "channel": utterance["channel"],
+                                }
+                            )
+                result.intent_groups.append(intent["intent_level_1"])
+                result.intent_subgroups.append(intent["intent_level_2"])
+                result.emotions.append(nlp["emotion"]["output"])
+                result.sentiments.append(nlp["sentiment"]["output"])
+
                 if nlp["hate_speech"]["output"]:
-                    hate_speech_flag = True
+                    result.hate_speech_flag = True
 
                 if nlp["sentiment"]["output"] == "NEG":
-                    neg_sentiment_flag = True
+                    result.neg_sentiment_flag = True
+
+                if nlp["emotion"]["output"] == "joy":
+                    result.joy_emotion_flag = True
+
+                if nlp["emotion"]["output"] == "sadness":
+                    result.sadness_emotion_flag = True
+
+                if nlp["emotion"]["output"] == "surprise":
+                    result.surprise_emotion_flag = True
+
+                if nlp["emotion"]["output"] == "fear":
+                    result.fear_emotion_flag = True
 
                 if nlp["emotion"]["output"] == "anger":
-                    anger_emotion_flag = True
+                    result.anger_emotion_flag = True
 
                 if nlp["emotion"]["output"] == "disgust":
-                    disgust_emotion_flag = True
+                    result.disgust_emotion_flag = True
 
-                events.append(event)
+                result.events.append(event)
                 event_position += 1
 
             # logger.critical(f"events {events}")
@@ -150,28 +175,75 @@ def process(channel, method, properties, body):
             # logger.critical(f"disgust_emotion_flag {disgust_emotion_flag}")
 
             # use pd to get the most common sentiment
-            main_sentiment = pd.Series(sentiments).value_counts().index[0]
+            result.main_sentiment = str(
+                (pd.Series(result.sentiments).value_counts().index[0])
+            )
             # logger.critical(f"main_sentiment {main_sentiment}")
 
             # use pd to get the most common emotion
-            main_emotion = pd.Series(emotions).value_counts().index[0]
+            result.main_emotion = str(
+                (pd.Series(result.emotions).value_counts().index[0])
+            )
             # logger.critical(f"main_emotion {main_emotion}")
 
             # use pd to get the most common intent group
             # and filter out the "Base" intent
-            main_intent_group = (
-                pd.Series(intent_groups).value_counts().drop("Base").index[0]
-            )
+            logger.error(result.intent_groups)
+            main_intent_list = pd.Series(result.intent_groups).value_counts().drop("Base")
 
+            if len(main_intent_list) > 0:
+                result.main_intent_group = main_intent_list.index[0]
+            else:
+                result.main_intent_group = "Base"
             # logger.critical(f"main_intent_group {main_intent_group}")
 
             # use pd to get the most common intent subgroup
-            main_intent_subgroup = (
-                pd.Series(intent_subgroups).value_counts().index[0]
+            result.main_intent_subgroup = str(
+                (pd.Series(result.intent_subgroups).value_counts().index[0])
             )
             # logger.critical(f"main_intent_subgroup {main_intent_subgroup}")
 
             # logger.critical(f"entities {entities}")
+
+        message = (
+            {
+                "interaction_id": j.interaction_id,
+                "status": "ALL_FINISHED",
+                "transcription": {
+                    "transcription_job_id": j.transcription_job_id,
+                    "base_path": j.base_path,
+                    "audio_url": j.audio_url,
+                    "asr_provider": j.asr_provider,
+                    "asr_language": j.asr_language,
+                    "sample_rate": j.sample_rate,
+                    "num_samples": j.num_samples,
+                    "channels": j.channels,
+                    "audio_format": j.audio_format,
+                    "is_silent": j.is_silent,
+                    "utterances": j.utterances,
+                },
+                "events": result.events,
+                "nlp": {
+                    "pipeline": "default",
+                    "main_sentiment": result.main_sentiment,
+                    "main_emotion": result.main_emotion,
+                    "main_intent_group": result.main_intent_group,
+                    "main_intent_subgroup": result.main_intent_subgroup,
+                    "hate_speech_flag": result.hate_speech_flag,
+                    "neg_sentiment_flag": result.neg_sentiment_flag,
+                    "joy_emotion_flag": result.joy_emotion_flag,
+                    "sadness_emotion_flag": result.sadness_emotion_flag,
+                    "surprise_emotion_flag": result.surprise_emotion_flag,
+                    "fear_emotion_flag": result.fear_emotion_flag,
+                    "anger_emotion_flag": result.anger_emotion_flag,
+                    "disgust_emotion_flag": result.disgust_emotion_flag,
+                    "entities": result.entities,
+                },
+            },
+        )
+
+        rabbit.publish(message)
+        ch.basic_ack(delivery_tag=method.delivery_tag)
 
     except AttributeError as error:
         logging.error(f"{error}")

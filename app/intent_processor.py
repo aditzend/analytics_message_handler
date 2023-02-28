@@ -7,14 +7,31 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
-rasa_host = os.getenv("RASA_HOST") or "192.168.43.170"
-rasa_port = os.getenv("RASA_PORT") or "30000"
-rasa_url = f"http://{rasa_host}:{rasa_port}"
-webhook_url = f"{rasa_url}/webhooks/rest/webhook"
-model_parse_url = f"{rasa_url}/model/parse"
-status_url = f"{rasa_url}/status"
+rasa_host_1 = os.getenv("RASA_HOST_1") or ""
+rasa_host_2 = os.getenv("RASA_HOST_2") or ""
+rasa_port_1 = os.getenv("RASA_PORT_1") or ""
+rasa_port_2 = os.getenv("RASA_PORT_2") or ""
+rasa_url_1 = f"http://{rasa_host_1}:{rasa_port_1}"
+rasa_url_2 = f"http://{rasa_host_2}:{rasa_port_2}"
+webhook_url_1 = f"{rasa_url_1}/webhooks/rest/webhook"
+webhook_url_2 = f"{rasa_url_2}/webhooks/rest/webhook"
+model_parse_url_1 = f"{rasa_url_1}/model/parse"
+model_parse_url_2 = f"{rasa_url_2}/model/parse"
+status_url_1 = f"{rasa_url_1}/status"
+status_url_2 = f"{rasa_url_2}/status"
 
-logger.info(f"Rasa webhook url: {webhook_url}")
+rasa = {
+    "1": {
+        "webhook_url": webhook_url_1,
+        "model_parse_url": model_parse_url_1,
+        "status_url": status_url_1,
+    },
+    "2": {
+        "webhook_url": webhook_url_2,
+        "model_parse_url": model_parse_url_2,
+        "status_url": status_url_2,
+    },
+}
 
 
 class Intent(BaseModel):
@@ -33,16 +50,15 @@ class Intent(BaseModel):
 
 def parse(interaction_id, text, channel):
     logger.debug(f"Starting intent parsing for {interaction_id}")
-    logger.debug(f"Rasa webhook url: {webhook_url}")
-    logger.debug(f"Rasa model parse url: {model_parse_url}")
 
     try:
-        model_data = requests.get(status_url)
+        ch = str(channel)
+        model_data = requests.get(rasa[ch]["status_url"])
         model_data = model_data.json()
         model_data = SimpleNamespace(**model_data)
 
         intent_data = requests.post(
-            model_parse_url,
+            rasa[ch]["model_parse_url"],
             json={"message_id": interaction_id, "text": text, "lang": "es"},
         )
 
@@ -53,7 +69,7 @@ def parse(interaction_id, text, channel):
         level_count = len(intent_levels)
 
         conversation_response = requests.post(
-            webhook_url,
+            rasa[ch]["webhook_url"],
             json={
                 "sender": interaction_id,
                 "message": text,
@@ -99,3 +115,8 @@ def parse(interaction_id, text, channel):
         return response
     except IOError as error:
         logger.error(f"IO Error: {error}")
+    except KeyError as error:
+        logger.error(
+            "Key Error, available conversations channels are 1 or 2, nothing else"
+            f" else : {error}"
+        )
